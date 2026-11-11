@@ -1,0 +1,158 @@
+---
+title: "Air pollution at RDU from 2018 to 2020"
+author: "Tianyi Lu"
+date: "November 11, 2026"
+output:
+  word_document:
+    reference_docx: report_style.docx
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 6.8, fig.height = 4.5, dpi = 300)
+library(dplyr)
+library(ggplot2)
+source("R/clean_air.R")
+
+# Process the three files separately, then combine the daily observations.
+air_2018 <- clean_air("data/AQ_2018.csv")
+air_2019 <- clean_air("data/AQ_2019.csv")
+air_2020 <- clean_air("data/AQ_2020.csv")
+air <- bind_rows(air_2018, air_2019, air_2020) |>
+  mutate(year = as.integer(format(date, "%Y")),
+         month = as.integer(format(date, "%m")))
+
+# Save the same cleaned daily data used by the report.
+dir.create("results", showWarnings = FALSE)
+write.csv(air, "results/daily_air.csv", row.names = FALSE)
+
+# The table uses formatted strings so trailing zeros are displayed.
+range_table <- function(daily) {
+  data.frame(
+    Pollutant = c("CO (ppm)", "PM2.5 (ug/m3 LC)", "O3 (ppm)"),
+    Minimum = vapply(daily[c("co", "pm25", "o3")],
+                     function(x) sprintf("%.3f", min(x, na.rm = TRUE)), character(1)),
+    Maximum = vapply(daily[c("co", "pm25", "o3")],
+                     function(x) sprintf("%.3f", max(x, na.rm = TRUE)), character(1)),
+    row.names = NULL
+  )
+}
+```
+
+GitHub: [tianyilu666-netizen/biostat721-project2](https://github.com/tianyilu666-netizen/biostat721-project2)
+
+## Data and cleaning
+
+I used the three course-provided files from the EPA monitor at RDU airport to explore daily CO, PM2.5, and ozone concentrations. CO was generally higher in colder months, while ozone was higher in spring and summer. These data describe pollution levels only; they do not include the health outcomes needed to study an association with sickle cell disease.
+
+The cleaning function removes exact duplicate rows, changes negative measurements to zero, and then averages the remaining measurements for each date. The order matters because duplicates would give some measurements extra weight, and a negative value would lower the daily mean if it were corrected afterward. Missing values are omitted from averages, but a day with no valid measurement stays missing; the function also allows ozone to be returned in ppb instead of the default ppm.
+
+There are `r nrow(air_2018)` observed dates in 2018, `r nrow(air_2019)` in 2019, and `r nrow(air_2020)` in January-April 2020. Four dates are absent from the 2018 file and are not filled in. The tables use non-missing daily concentrations.
+
+## Daily concentration ranges
+
+```{r table2018}
+knitr::kable(range_table(air_2018), align = c("l", "r", "r"),
+             caption = "Table 1. Minimum and maximum daily concentrations in 2018.")
+```
+
+```{r table2019}
+knitr::kable(range_table(air_2019), align = c("l", "r", "r"),
+             caption = "Table 2. Minimum and maximum daily concentrations in 2019.")
+```
+
+```{r table2020}
+knitr::kable(range_table(air_2020), align = c("l", "r", "r"),
+             caption = "Table 3. Minimum and maximum daily concentrations in January-April 2020.")
+```
+
+```{=openxml}
+<w:p><w:r><w:br w:type="page"/></w:r></w:p>
+```
+
+## Monthly CO and ozone
+
+For each calendar month, I pooled the daily values across available years. The points show the mean and the error bars show the requested 95% confidence interval, calculated as $\bar{x} \pm 1.96s/\sqrt{n}$, where $n$ counts non-missing daily values for that pollutant. January-April include 2018-2020, while May-December include 2018-2019.
+
+```{r co-ozone, fig.height=4.7}
+# Stack the two pollutants to use one summary and plotting code path.
+co_o3 <- bind_rows(
+  air |> transmute(month, pollutant = "CO", concentration = co),
+  air |> transmute(month, pollutant = "O3", concentration = o3)
+)
+monthly_co_o3 <- co_o3 |>
+  group_by(month, pollutant) |>
+  summarise(n = sum(!is.na(concentration)),
+            average = mean(concentration, na.rm = TRUE),
+            sd = sd(concentration, na.rm = TRUE), .groups = "drop") |>
+  mutate(se = sd / sqrt(n), lower = average - 1.96 * se,
+         upper = average + 1.96 * se)
+write.csv(monthly_co_o3, "results/monthly_co_o3.csv", row.names = FALSE)
+
+# Free y scales let both seasonal patterns remain visible in their own panels.
+plot1 <- ggplot(monthly_co_o3,
+                aes(x = month, y = average, color = pollutant)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.18,
+                linewidth = 0.5) +
+  geom_point(size = 2.4) +
+  facet_wrap(~ pollutant, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_color_manual(values = c(CO = "#0072B2", O3 = "#D55E00")) +
+  labs(title = "Monthly CO and ozone at RDU",
+       subtitle = "Pooled daily means with 95% confidence intervals",
+       x = "Month", y = "Concentration (ppm)", color = "Pollutant") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold"))
+plot1
+ggsave("results/co_ozone_monthly.png", plot1, width = 6.8, height = 4.7,
+       dpi = 300, bg = "white")
+```
+
+I used separate panels with different y-axis scales because ozone concentrations in ppm are much smaller than CO concentrations. This makes each seasonal pattern easier to see, although the heights of points should not be compared across panels.
+
+These intervals follow the assignment's formula; they do not account for possible correlation between measurements on nearby days.
+
+```{=openxml}
+<w:p><w:r><w:br w:type="page"/></w:r></w:p>
+```
+
+## Monthly PM2.5 by year
+
+```{r pm25, fig.height=3.9}
+# Average daily PM2.5 within each year and month; no values are added after April 2020.
+monthly_pm25 <- air |>
+  group_by(year, month) |>
+  summarise(n = sum(!is.na(pm25)), average = mean(pm25, na.rm = TRUE),
+            .groups = "drop")
+write.csv(monthly_pm25, "results/monthly_pm25.csv", row.names = FALSE)
+plot2 <- ggplot(monthly_pm25,
+                aes(x = month, y = average, color = factor(year),
+                    group = year, shape = factor(year))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 2.4) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_color_manual(values = c("2018" = "#0072B2", "2019" = "#D55E00",
+                                "2020" = "#009E73")) +
+  scale_shape_manual(values = c("2018" = 16, "2019" = 17, "2020" = 15)) +
+  labs(title = "Monthly PM2.5 at RDU by year",
+       subtitle = "Means of daily concentrations; 2020 ends in April",
+       x = "Month", y = "PM2.5 (ug/m3 LC)", color = "Year", shape = "Year") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+plot2
+ggsave("results/pm25_monthly.png", plot2, width = 6.8, height = 3.9,
+       dpi = 300, bg = "white")
+```
+
+I used lines with points for monthly means because they make the month-to-month changes and differences between years easy to follow without crowding the plot with daily observations.
+
+## Interpretation
+
+CO was highest in the colder months, especially November and December, while ozone was higher in spring and summer and peaked in June. PM2.5 varied more between years: 2018 had higher monthly means than 2019 in much of the second half of the year, and 2020 started lower in January and February but still had the largest daily maximum, 31.200 ug/m3 LC. The 2020 results cover only January-April, so they do not describe a full year, and the pooled May-December CO and ozone estimates use two years rather than three.
+
+## AI use statement
+
+I used ChatGPT/Codex to help write the cleaning function, analysis code, and report draft. The generated code was run on all three files and checked with a small example for duplicate removal, negative values, and missing values, as well as checks of ozone unit conversion and monthly summaries; the rendered report was also checked for layout.
